@@ -71,22 +71,32 @@ This curriculum produces a distributed SQL database with exact feature parity to
 
 ```
 Week 1-2: Storage Engine Trait + Memory Engine
-    ↓
-Week 3-4: BitCask Persistent Engine
+    ↓                          ↓
+    ↓                   Week 3-4: BitCask Persistent Engine
+    ↓                          ↓
+    ├──────────────────────────┘
     ↓
 Week 5-6: Keycode Order-Preserving Encoding
     ↓
 Week 7-11: MVCC Transaction Layer (Snapshot Isolation)
     ↓
-Week 12-17: Raft Consensus (Election, Replication, Linearizable Reads)
-    ↓
-Week 18-20: SQL Lexer + Parser (Precedence Climbing)
-    ↓
-Week 21-23: SQL Planner + Heuristic Optimizer
+    ├─────────────────────────────────────────────────┐
+    ↓                                                 ↓
+Week 12-17: Raft Consensus                   Week 18-20: SQL Lexer + Parser
+(Election, Replication,                      (Precedence Climbing)
+ Linearizable Reads)                                  ↓
+    ↓                                        Week 21-23: SQL Planner +
+    ↓                                        Heuristic Optimizer
+    ↓                                                 ↓
+    ├─────────────────────────────────────────────────┘
     ↓
 Week 24-25: SQL Executor (Iterator Model, Joins, Aggregates)
     ↓
 Week 26: Server/Client Integration + Testing
+
+Note: BitCask and Keycode are independent of each other (both feed into MVCC).
+Raft and SQL Parser are also independent (both need MVCC; integration happens
+in Week 24-26). Teams of 2+ developers can parallelize these tracks.
 ```
 
 ---
@@ -313,7 +323,7 @@ ToyDB's custom "Keycode" encoding ensures that `bytes.Compare(encode(a), encode(
 2. Build tuple/sequence encoding: `EncodeTuple(values ...any) []byte`
 3. Implement enum variant index encoding (u8 + fields)
 4. Implement `prefix_range(prefix []byte)` helper for prefix scans
-5. Implement MVCC key structure:
+5. Implement MVCC key encoding structure (you will use this in Phase 2 — for now, just build the encode/decode logic):
     ```go
     type MVCCKey struct {
         Type    KeyType  // NextVersion, TxnActive, TxnActiveSnapshot, TxnWrite, Version, Unversioned
@@ -321,6 +331,7 @@ ToyDB's custom "Keycode" encoding ensures that `bytes.Compare(encode(a), encode(
         Version uint64   // Transaction ID
     }
     ```
+    These key types will be explained in depth in Module 2.1 (MVCC Fundamentals). At this stage, focus on ensuring the encoding produces correct lexicographic ordering for each variant.
 
 ### Deliverable
 `keycode` package with `Encode`/`Decode` for all types, passing ordering tests for 10,000+ random values.
@@ -473,7 +484,7 @@ const (
     - Same as Set but with tombstone value
 3. Implement `BeginReadOnly()` and `BeginAsOf(version)` without incrementing NextVersion
 
-**Week 10: Commit and Rollback**
+**Week 10: Commit, Rollback, and Resume**
 1. Implement `Transaction.Commit()`:
     - Delete TxnWrite records and remove TxnActive marker
     - Do not flush here; rely on Raft log for durability
@@ -481,6 +492,10 @@ const (
     - Scan our TxnWrite entries
     - Delete corresponding Version entries and TxnWrite records
     - Delete TxnActive marker (leave TxnActiveSnapshot for time-travel)
+3. Implement `MVCC.Resume(state TransactionState)`:
+    - Reconstruct a `Transaction` from a serialized `TransactionState` (version, read_only flag, active set)
+    - Verify the TxnActive marker still exists for read-write transactions (error if not)
+    - This is critical for Raft integration: when the SQL engine receives a replicated command, it resumes the transaction that was started on the leader node
 
 ### Deliverable
 Full transaction support with concurrent transaction tests demonstrating conflict detection.
@@ -744,7 +759,7 @@ This ensures reads see all committed writes, even if a new leader was elected.
 **Go Patterns:**
 | Resource | Why It Matters |
 |----------|----------------|
-| [etcd/raft ReadIndex](https://github.com/etcd-io/etcd/blob/main/raft/doc.go) | Production linearizable read implementation |
+| [etcd/raft ReadIndex](https://github.com/etcd-io/raft/blob/main/doc.go) | Production linearizable read implementation |
 
 ### Implementation Assignment
 
@@ -813,7 +828,7 @@ Complete Raft implementation with linearizable reads, integrated with MVCC, pass
 | Resource | Why It Matters |
 |----------|----------------|
 | [Go text/scanner](https://pkg.go.dev/text/scanner) | Standard library scanner for inspiration |
-| [InfluxDB Parser](https://github.com/influxdata/influxql/tree/master/parser) | Production SQL parser in Go |
+| [InfluxDB SQL Parser](https://github.com/influxdata/influxql) | Production SQL parser in Go (parser.go, scanner.go at repo root) |
 
 ### Implementation Assignment
 
@@ -965,7 +980,7 @@ Note: Index lookups treat NULL and NaN values as equal to support `IS NULL` and 
 
 ### Implementation Assignment
 
-**Week 21: Catalog + Basic Planning**
+**Week 21: Catalog + Basic Planning + Schema Validation**
 1. Implement schema catalog:
    ```go
    type Catalog interface {
@@ -975,9 +990,13 @@ Note: Index lookups treat NULL and NaN values as equal to support `IS NULL` and 
        ListTables() []string
    }
    ```
-2. Convert SELECT AST to Scan → Filter → Projection plan
-3. Implement name resolution with a Scope (bind columns to indexes, handle aliases)
-4. Build Values and Remap nodes for INSERT column mapping
+2. Implement schema-level validation in `Table`:
+    - `Table.Validate()`: verify primary key exists, column types valid, foreign key references exist, referenced columns are primary keys
+    - `Table.ValidateRow(row)`: type-check values, enforce NOT NULL, enforce UNIQUE constraints, enforce foreign key referential integrity
+3. Implement type checking during plan construction (verify operand types for expressions, column types for comparisons)
+4. Convert SELECT AST to Scan → Filter → Projection plan
+5. Implement name resolution with a Scope (bind columns to indexes, handle aliases)
+6. Build Values and Remap nodes for INSERT column mapping
 
 **Week 22: Join Planning**
 1. Implement join order from AST (ToyDB uses AST order, no reordering)
@@ -1049,7 +1068,7 @@ ToyDB buffers all result rows in the session before sending them over the networ
 **Execution Models:**
 | Paper | Why It Matters |
 |-------|----------------|
-| [Volcano: Query Evaluation System](https://cs.uwaterloo.ca/~david/cs848s14/volcano.pdf) | Graefe - iterator model origin |
+| [Volcano: Query Evaluation System](https://cs.uwaterloo.ca/~david/cs848/background/volcano.pdf) | Graefe - iterator model origin |
 
 **Join Algorithms:**
 | Resource | Why It Matters |
@@ -1077,6 +1096,12 @@ ToyDB buffers all result rows in the session before sending them over the networ
 5. Implement `IndexLookupExecutor` and `KeyLookupExecutor`
 6. Implement `ValuesExecutor`, `RemapExecutor`, `NothingExecutor`
 7. Wire executor to MVCC transactions for actual data access
+8. Implement secondary index maintenance during write operations:
+    - On INSERT: create index entries for all indexed columns
+    - On UPDATE: delete old index entries and create new ones for changed indexed columns
+    - On DELETE: remove index entries for all indexed columns
+    - Enforce foreign key referential integrity on DELETE (error if other tables reference the row)
+9. Implement `<>` as alternate not-equal operator (alias for `!=`)
 
 ### Deliverable
 Complete query executor running all ToyDB SQL features against MVCC storage.
@@ -1098,9 +1123,19 @@ Complete query executor running all ToyDB SQL features against MVCC storage.
 **Protocol:**
 - TCP connection with Bincode-encoded Request/Response messages (no extra framing)
 - Binary serialization (Bincode in Rust; use encoding/gob or msgpack in Go)
-- Request types: Execute SQL, Status
-- Response types: StatementResult (buffered rows), Status
-- Session tracks: active transaction ID, transaction mode
+- Request types:
+    - `Execute(string)`: execute a SQL statement
+    - `GetTable(string)`: retrieve table schema by name
+    - `ListTables`: list all table names
+    - `Status`: get server/cluster status
+- Response types:
+    - `Execute(StatementResult)`: result of SQL execution
+    - `Row(Row)`: streaming row (used internally)
+    - `GetTable(Table)`: table schema
+    - `ListTables([]string)`: table name list
+    - `Status(Status)`: server status containing node ID, Raft status, and MVCC status
+- `StatementResult` variants: `Begin{txn_state}`, `Commit{version}`, `Rollback{version}`, `Explain{plan}`, `CreateTable{name}`, `DropTable{name, existed}`, `Delete{count}`, `Insert{count}`, `Update{count}`, `Select{columns, rows}`
+- Session tracks: active transaction ID, transaction mode (client updates its `txn` field based on Begin/Commit/Rollback responses)
 
 **Server Features:**
 - Per-connection session handling with transaction state
@@ -1191,6 +1226,7 @@ Use this checklist to verify feature parity:
 - [ ] Version visibility rules
 - [ ] Write conflict detection (lowest-txn-id wins)
 - [ ] Rollback support
+- [ ] Transaction resume from serialized state (for Raft integration)
 - [ ] Time-travel reads (AS OF SYSTEM TIME) with active-set snapshots
 - [ ] TxnActiveSnapshot and Unversioned keys
 - [ ] NO garbage collection (intentional)
@@ -1251,13 +1287,18 @@ Use this checklist to verify feature parity:
 - [ ] NaN/Infinity handling
 - [ ] sqrt() function (only built-in function)
 - [ ] Secondary index lookups
-- [ ] Foreign key / referential integrity enforcement
+- [ ] Secondary index maintenance (create/update/delete entries during DML)
+- [ ] Foreign key / referential integrity enforcement (schema validation + delete checks)
+- [ ] Type checking during plan construction
 - [ ] SELECT results buffered for client responses
 
 ## Server
 - [ ] TCP with Bincode (no framing)
 - [ ] Binary serialization
-- [ ] Session transaction state
+- [ ] Request types: Execute, GetTable, ListTables, Status
+- [ ] Response types: Execute, Row, GetTable, ListTables, Status
+- [ ] StatementResult variants (Begin, Commit, Rollback, Explain, CreateTable, DropTable, Delete, Insert, Update, Select)
+- [ ] Session transaction state (client-side tracking from Begin/Commit/Rollback responses)
 - [ ] Leader forwarding
 - [ ] Separate Raft and SQL listeners
 - [ ] Threaded routing (goroutines + channels in Go)
@@ -1309,7 +1350,7 @@ toydb-go/
 | Testing | `github.com/stretchr/testify` | Assertions and mocking |
 | Testing | `github.com/anishathalye/porcupine` | Linearizability checking |
 | Serialization | `github.com/vmihailenco/msgpack/v5` | Binary encoding |
-| Sorted Map | `github.com/google/btree` | In-memory B-tree |
+| Sorted Map | `github.com/google/btree` | In-memory B-tree (archived Oct 2025 — still functional, consider alternatives) |
 | Logging | `log/slog` (stdlib) | Structured logging |
 | CLI | `github.com/spf13/cobra` | Command-line interface |
 | Networking | `google.golang.org/grpc` | RPC (optional, can use net/rpc) |
@@ -1385,7 +1426,7 @@ These are the exact references from [ToyDB's docs/references.md](https://github.
 **MVCC Implementation:**
 | Resource | Author | Notes |
 |----------|--------|-------|
-| 💬 [Implementing Your Own Transactions with MVCC](https://elliotchance.medium.com/implementing-your-own-transactions-with-mvcc-bba11cab7e27) | Elliot Chance (2015) | "Found blog posts to be the most helpful" |
+| 💬 [Implementing Your Own Transactions with MVCC](https://elliotchance.medium.com/implementing-your-own-transactions-with-mvcc-bba11cab8e70) | Elliot Chance (2015) | "Found blog posts to be the most helpful" |
 | 💬 [How Postgres Makes Transactions Atomic](https://brandur.org/postgres-atomicity) | Brandur Leach (2017) | Practical MVCC insights |
 
 ## SQL Parsing
